@@ -6,15 +6,6 @@
       "type": "rust",
       "package": "nfo",
       "candid": "src/nfo/nfo.did"
-    },
-    "nfo_assets": {
-      "type": "assets",
-      "source": [
-        "src/nfo_assets/assets"
-      ],
-      "dependencies": [
-        "nfo"
-      ]
     }
   },
   "defaults": {
