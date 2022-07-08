@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "dfx": "0.10.0",
+  "canisters": {
+    "nfo": {
+      "type": "rust",
+      "package": "nfo",
+      "candid": "src/nfo/nfo.did"
+    },
+    "nfo_assets": {
+      "type": "assets",
+      "source": [
+        "src/nfo_assets/assets"
+      ],
+      "dependencies": [
+        "nfo"
+      ]
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": "",
+      "args": ""
+    }
+  },
+  "networks": {
+    "local": {
+      "bind": "127.0.0.1:8000",
+      "type": "ephemeral"
+    }
+  }
+}
