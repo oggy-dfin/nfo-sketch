@@ -3,13 +3,13 @@
  *  - how do I specify that only the owner can, e.g., burn an object
  *  - 
  */
-use std::{collections::HashMap, cell::RefCell, collections::HashSet, fmt::Display};
+use std::{collections::HashMap, cell::RefCell, collections::HashSet};
 use ic_cdk::export::Principal;
 use candid::{Nat, CandidType, Deserialize};
 // use itertools::Itertools;
 extern crate derive_more;
 // use the derives that you want in the file
-use derive_more::{Add, Display, From};
+use derive_more::Display;
 
 pub type ObjectId = Nat;
 pub type ObjectType = String;
@@ -22,6 +22,7 @@ pub enum NFOError {
     SchemaMismatchError,
     NotAuthorizedError,
     DuplicateObjectIdError { object_id: ObjectId },
+    DuplicateObjectTypeError { object_type: ObjectType },
 }
 
 use NFOError::*;
@@ -92,7 +93,7 @@ pub enum Actor {
     Fixed(Principal),
 }
 
-struct ObjectAccessControlPolicy {
+pub struct ObjectAccessControlPolicy {
     can_mint: HashSet<Principal>,
     can_burn: HashSet<Actor>,
     object_schema: ObjectSchema,
@@ -111,29 +112,7 @@ thread_local!(
 );
 
 
-fn check_can_create_objects(caller: Principal, policy: &CanisterAccessControlPolicy) -> bool {
-    todo!();
-}
 
-// TODO: add deserializers to all argument types
-// #[ic_cdk_macros::update]
-fn new_object_type(object_type_name: ObjectType, access_control_policy: ObjectAccessControlPolicy) -> Result<(), NFOError> {
-    let caller = ic_cdk::caller();
-
-    // check that the caller can create new object types
-    CANISTER_ACCESS_CONTROL.with(|cac| {
-        let canister_acp = cac.borrow();
-        check_can_create_objects(caller, &canister_acp);
-    });
-
-    OBJECT_ACCESS_CONTROL.with(|oac| {
-        let mut object_acp = oac.borrow_mut();
-        // check that the object type name is unique for this canister (hasn't been added before)
-        assert!(!object_acp.contains_key(&object_type_name));
-        object_acp.insert(object_type_name, access_control_policy);
-    });
-    Ok(())
-}
 
 fn check_value_matches_value_schema(value: &GenericValue, schema: &GenericValueSchema) -> Result<(), NFOError> {
     match (value, schema) {
@@ -174,21 +153,32 @@ fn check_caller_allowed(caller: &Principal, owner: &Principal, actors: &HashSet<
         Err(NotAuthorizedError)
     }
 }
+
+fn set_value_internal(
+    caller: &Principal, 
+    ledger: &mut Ledger, 
+    oac_by_type: &ObjectAccessControlPolicyByType, 
+    object_id: ObjectId, 
+    field_name: FieldName, 
+    value: GenericValue) -> Result<(), NFOError>  {
+        let obj = ledger.objects.get_mut(&object_id).ok_or(NoSuchObjectError { object_id: object_id })?;
+        let oac = oac_by_type.get(&obj.object_type).unwrap();
+        let schema = &oac.object_schema;
+        check_value_matches_field_schema(&schema, &field_name, &value)?;
+        let field_writers = &oac.field_writers.get(&field_name).ok_or(NoSuchFieldError { field_name: field_name.clone() })?;
+        check_caller_allowed(caller, &obj.owner, field_writers)?;
+        obj.fields.insert(field_name, value);
+        Ok(())
+
+}
 // #[ic_cdk_macros::update]
 pub fn set_value(object_id: ObjectId, field_name: FieldName, value: GenericValue) -> Result<(), NFOError> {
     let caller = ic_cdk::caller();
 
     LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
         let mut ledger = l.borrow_mut();
-        let obj = ledger.objects.get_mut(&object_id).ok_or(NoSuchObjectError { object_id: object_id })?;
         let o_borrow = o.borrow();
-        let oac = o_borrow.get(&obj.object_type).unwrap();
-        let schema = &oac.object_schema;
-        check_value_matches_field_schema(&schema, &field_name, &value)?;
-        let field_writers = &oac.field_writers.get(&field_name).ok_or(NoSuchFieldError { field_name: field_name.clone() })?;
-        check_caller_allowed(&caller, &obj.owner, field_writers)?;
-        obj.fields.insert(field_name, value);
-        Ok(())
+        set_value_internal(&caller, &mut ledger, &o_borrow, object_id, field_name, value)
     })})
 }
 
@@ -197,14 +187,19 @@ fn format_policy(field_writers: &HashMap<FieldName, HashSet<Actor>>) -> String {
         format!("{}: {:#?}\n", k, v)).collect()
 }
 
+pub fn display_policy_internal(ledger: &Ledger, oac_by_type: &ObjectAccessControlPolicyByType, object_id: ObjectId) -> Result<String, NFOError> {
+    let obj = ledger.objects.get(&object_id).ok_or(NoSuchObjectError { object_id: object_id })?;
+    let oac = oac_by_type.get(&obj.object_type).unwrap();
+    let field_writers = &oac.field_writers;
+    Ok(format_policy(field_writers))
+}
+
+
 pub fn display_policy(object_id: ObjectId) -> Result<String, NFOError> {
     LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
         let ledger = l.borrow();
-        let obj = ledger.objects.get(&object_id).ok_or(NoSuchObjectError { object_id: object_id })?;
         let o_borrow = o.borrow();
-        let oac = o_borrow.get(&obj.object_type).unwrap();
-        let field_writers = &oac.field_writers;
-        Ok(format_policy(field_writers))
+        display_policy_internal(&ledger, &o_borrow, object_id)
     })})
 }
 
@@ -226,24 +221,38 @@ fn check_value_matches_object_schema(value: &HashMap<FieldName, GenericValue>, s
     }
     Ok(())
 }
+
+fn mint_internal(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAccessControlPolicyByType, new_object_id: Option<ObjectId>, object_type: ObjectType, owner: Principal, value: HashMap<FieldName, GenericValue>) -> Result<ObjectId, NFOError> {
+    let object_id = match new_object_id {
+        None => Ok(allocate_fresh_id(&ledger.objects)),
+        Some(id) if ledger.objects.contains_key(&id) => Err(DuplicateObjectIdError { object_id: id }),
+        Some(id) => Ok(id),
+    }?;
+    let oac = oac_by_type.get(&object_type).unwrap();
+    let schema = &oac.object_schema;
+    let _ = if oac.can_mint.contains(&caller) { Ok(()) } else { Err(NotAuthorizedError) }?;
+    check_value_matches_object_schema(&value, &schema)?;
+    ledger.objects.insert(object_id.clone(), Object { owner: owner, object_type: object_type, fields: value });
+    Ok(object_id)
+}
+
 // #[ic_cdk_macros::update]
 pub fn mint(new_object_id: Option<ObjectId>, object_type: ObjectType, owner: Principal, value: HashMap<FieldName, GenericValue>) -> Result<ObjectId, NFOError> {
     let caller = ic_cdk::caller();
     LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
         let mut ledger = l.borrow_mut();
-        let object_id = match new_object_id {
-            None => Ok(allocate_fresh_id(&ledger.objects)),
-            Some(id) if ledger.objects.contains_key(&id) => Err(DuplicateObjectIdError { object_id: id }),
-            Some(id) => Ok(id),
-        }?;
         let o_borrow = o.borrow();
-        let oac = o_borrow.get(&object_type).unwrap();
-        let schema = &oac.object_schema;
-        let _ = if oac.can_mint.contains(&caller) { Ok(()) } else { Err(NotAuthorizedError) }?;
-        check_value_matches_object_schema(&value, &schema)?;
-        ledger.objects.insert(object_id.clone(), Object { owner: owner, object_type: object_type, fields: value });
-        Ok(object_id)
+        mint_internal(&caller, &mut ledger, &o_borrow, new_object_id, object_type, owner, value)
     })})
+}
+
+fn burn_internal(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAccessControlPolicyByType, object_id: ObjectId) -> Result<(), NFOError> {
+    let obj = ledger.objects.get_mut(&object_id).ok_or(NoSuchObjectError { object_id: object_id.clone() })?;
+    let oac = oac_by_type.get(&obj.object_type).unwrap();
+    let _ = check_caller_allowed(&caller, &obj.owner, &oac.can_burn)?;
+    ledger.objects.remove(&object_id);
+    Ok(())
+
 }
 
 // #[ic_cdk_macros::update]
@@ -251,11 +260,30 @@ pub fn burn(object_id: ObjectId) -> Result<(), NFOError> {
     let caller = ic_cdk::caller();
     LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
         let mut ledger = l.borrow_mut();
-        let obj = ledger.objects.get_mut(&object_id).ok_or(NoSuchObjectError { object_id: object_id.clone() })?;
         let o_borrow = o.borrow();
-        let oac = o_borrow.get(&obj.object_type).unwrap();
-        let _ = check_caller_allowed(&caller, &obj.owner, &oac.can_burn)?;
-        ledger.objects.remove(&object_id);
-        Ok(())
+        burn_internal(&caller, &mut ledger, &o_borrow, object_id)
+    })})
+}
+
+fn add_object_type_internal(
+    caller: &Principal, 
+    cac: &CanisterAccessControlPolicy, 
+    oac_by_type: &mut ObjectAccessControlPolicyByType, 
+    object_type: ObjectType, 
+    policy: ObjectAccessControlPolicy) -> Result<(), NFOError> {
+
+    if !oac_by_type.contains_key(&object_type) { Ok(()) } else { Err(DuplicateObjectTypeError { object_type: object_type.clone() })}?;
+    if cac.can_create_new_types.contains(&caller) { Ok(()) } else { Err(NotAuthorizedError )}?;
+    oac_by_type.insert(object_type, policy);
+    Ok(())
+
+}
+
+pub fn add_object_type(object_type: ObjectType, policy: ObjectAccessControlPolicy) -> Result<(), NFOError> {
+    let caller = ic_cdk::caller();
+    CANISTER_ACCESS_CONTROL.with(|c| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let cac = c.borrow_mut();
+        let mut oac_by_type = o.borrow_mut();
+        add_object_type_internal(&caller, &cac, &mut oac_by_type, object_type, policy)
     })})
 }
