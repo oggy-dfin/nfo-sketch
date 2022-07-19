@@ -1,10 +1,30 @@
-use std::{collections::HashMap, cell::RefCell, collections::HashSet};
+/*
+ * Open questions:
+ *  - how do I specify that only the owner can, e.g., burn an object
+ *  - 
+ */
+use std::{collections::HashMap, cell::RefCell, collections::HashSet, fmt::Display};
 use ic_cdk::export::Principal;
 use candid::{Nat, CandidType, Deserialize};
+// use itertools::Itertools;
+extern crate derive_more;
+// use the derives that you want in the file
+use derive_more::{Add, Display, From};
 
-pub type ObjectIdentifier = Nat;
+pub type ObjectId = Nat;
+pub type ObjectType = String;
+pub type FieldName = String;
 
-type ErrorTodo = String;
+#[derive(Debug)]
+pub enum NFOError {
+    NoSuchObjectError { object_id: ObjectId },
+    NoSuchFieldError { field_name: FieldName },
+    SchemaMismatchError,
+    NotAuthorizedError,
+    DuplicateObjectIdError { object_id: ObjectId },
+}
+
+use NFOError::*;
 
 #[derive(CandidType, Deserialize)]
 pub enum GenericValue {
@@ -46,33 +66,42 @@ pub enum GenericValueSchema {
     NestedContent(Vec<(String, GenericValueSchema)>),
 }
 
-struct Object {
+pub struct Object {
     owner: Principal,
-    fields: HashMap<String, GenericValue>,
+    object_type: ObjectType,
+    fields: HashMap<FieldName, GenericValue>,
 }
 
-type ObjectSchema = HashMap<String, GenericValueSchema>;
+type ObjectSchema = HashMap<FieldName, GenericValueSchema>;
 
+#[derive(Default)]
 pub struct Ledger {
     // todo: add whatever more stuff we need
-    pub objects: HashMap<ObjectIdentifier, GenericValue>,
+    pub objects: HashMap<ObjectId, Object>,
 }
 
+#[derive(Default)]
 struct CanisterAccessControlPolicy {
     can_create_new_types: HashSet<Principal>,
     // TODO: add whatever canister-level actions we need
 }
 
+#[derive(PartialEq, Eq, Hash, Debug, Display)]
+pub enum Actor {
+    Owner,
+    Fixed(Principal),
+}
+
 struct ObjectAccessControlPolicy {
     can_mint: HashSet<Principal>,
-    can_burn: HashSet<Principal>,
+    can_burn: HashSet<Actor>,
     object_schema: ObjectSchema,
     // TODO: figure out how to add the owner to writers of a field
     // TODO: figure if we want fine-grained access control for the nested fields
-    field_writers: HashMap<String, HashSet<Principal>>,
+    field_writers: HashMap<FieldName, HashSet<Actor>>,
 } 
 
-type ObjectAccessControlPolicyByType = HashMap<String, ObjectAccessControlPolicy>;
+type ObjectAccessControlPolicyByType = HashMap<ObjectType, ObjectAccessControlPolicy>;
 
 // TODO: add default implementations of the data structures
 thread_local!(
@@ -82,23 +111,23 @@ thread_local!(
 );
 
 
-fn check_can_create_objects(caller: Principal, policy: CanisterAccessControlPolicy) -> bool {
+fn check_can_create_objects(caller: Principal, policy: &CanisterAccessControlPolicy) -> bool {
     todo!();
 }
 
 // TODO: add deserializers to all argument types
 // #[ic_cdk_macros::update]
-fn new_object_type(object_type_name: String, access_control_policy: ObjectAccessControlPolicy) -> Result<(), ErrorTodo> {
+fn new_object_type(object_type_name: ObjectType, access_control_policy: ObjectAccessControlPolicy) -> Result<(), NFOError> {
     let caller = ic_cdk::caller();
 
     // check that the caller can create new object types
     CANISTER_ACCESS_CONTROL.with(|cac| {
         let canister_acp = cac.borrow();
-        check_can_create_objects(caller, *canister_acp);
+        check_can_create_objects(caller, &canister_acp);
     });
 
     OBJECT_ACCESS_CONTROL.with(|oac| {
-        let object_acp = oac.borrow_mut();
+        let mut object_acp = oac.borrow_mut();
         // check that the object type name is unique for this canister (hasn't been added before)
         assert!(!object_acp.contains_key(&object_type_name));
         object_acp.insert(object_type_name, access_control_policy);
@@ -106,30 +135,127 @@ fn new_object_type(object_type_name: String, access_control_policy: ObjectAccess
     Ok(())
 }
 
+fn check_value_matches_value_schema(value: &GenericValue, schema: &GenericValueSchema) -> Result<(), NFOError> {
+    match (value, schema) {
+        (GenericValue::BoolContent(_), GenericValueSchema::BoolContent) => Ok(()),
+        (GenericValue::BlobContent(_), GenericValueSchema::BlobContent) => Ok(()),
+        (GenericValue::FloatContent(_), GenericValueSchema::FloatContent) => Ok(()),
+        (GenericValue::Int8Content(_), GenericValueSchema::Int8Content) => Ok(()),
+        (GenericValue::Int16Content(_), GenericValueSchema::Int16Content) => Ok(()),
+        (GenericValue::Int32Content(_), GenericValueSchema::Int32Content) => Ok(()),
+        (GenericValue::Int64Content(_), GenericValueSchema::Int64Content) => Ok(()),
+        (GenericValue::Nat8Content(_), GenericValueSchema::Nat8Content) => Ok(()),
+        (GenericValue::Nat16Content(_), GenericValueSchema::Nat16Content) => Ok(()),
+        (GenericValue::Nat32Content(_), GenericValueSchema::Nat32Content) => Ok(()),
+        (GenericValue::Nat64Content(_), GenericValueSchema::Nat64Content) => Ok(()),
+        (GenericValue::TextContent(_), GenericValueSchema::TextContent) => Ok(()),
+        (GenericValue::Principal(_), GenericValueSchema::Principal) => Ok(()),
+        (GenericValue::NestedContent(cnt), GenericValueSchema::NestedContent(cnt_schema)) if cnt.len() == cnt_schema.len() => {
+            for (f, f_schema) in cnt.iter().zip(cnt_schema) {
+                if f.0 != f_schema.0 { return Err(SchemaMismatchError) };
+                let _ = check_value_matches_value_schema(&f.1, &f_schema.1)?;
+            }
+            Ok(())
+        }
+        _ => Err(SchemaMismatchError),
+    }
+}
+
+fn check_value_matches_field_schema(schema: &ObjectSchema, field_name: &FieldName, value: &GenericValue) -> Result<(), NFOError> {
+    schema.get(field_name).map_or(
+        Err(NoSuchFieldError { field_name: field_name.clone() }), 
+        |value_schema| check_value_matches_value_schema(value, value_schema))
+}
+
+fn check_caller_allowed(caller: &Principal, owner: &Principal, actors: &HashSet<Actor>) -> Result<(), NFOError> {
+    if actors.contains(&Actor::Fixed(caller.clone())) || (caller == owner && actors.contains(&Actor::Owner)) {
+        Ok(())
+    } else { 
+        Err(NotAuthorizedError)
+    }
+}
 // #[ic_cdk_macros::update]
-fn set_value(object_id: ObjectIdentifier, field_name: String, value: GenericValue) -> Result<(), ErrorTodo> {
+pub fn set_value(object_id: ObjectId, field_name: FieldName, value: GenericValue) -> Result<(), NFOError> {
     let caller = ic_cdk::caller();
-    todo!();
-    // TODO: check that the value of the field corresponds to the type in the object
-    // TODO: check that the caller is allowed to set the field
-    // TODO: check that the object exists
-    // TODO: change the value of the field
+
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let mut ledger = l.borrow_mut();
+        let obj = ledger.objects.get_mut(&object_id).ok_or(NoSuchObjectError { object_id: object_id })?;
+        let o_borrow = o.borrow();
+        let oac = o_borrow.get(&obj.object_type).unwrap();
+        let schema = &oac.object_schema;
+        check_value_matches_field_schema(&schema, &field_name, &value)?;
+        let field_writers = &oac.field_writers.get(&field_name).ok_or(NoSuchFieldError { field_name: field_name.clone() })?;
+        check_caller_allowed(&caller, &obj.owner, field_writers)?;
+        obj.fields.insert(field_name, value);
+        Ok(())
+    })})
+}
+
+fn format_policy(field_writers: &HashMap<FieldName, HashSet<Actor>>) -> String {
+    field_writers.iter().map(|(k, v)| 
+        format!("{}: {:#?}\n", k, v)).collect()
+}
+
+pub fn display_policy(object_id: ObjectId) -> Result<String, NFOError> {
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let ledger = l.borrow();
+        let obj = ledger.objects.get(&object_id).ok_or(NoSuchObjectError { object_id: object_id })?;
+        let o_borrow = o.borrow();
+        let oac = o_borrow.get(&obj.object_type).unwrap();
+        let field_writers = &oac.field_writers;
+        Ok(format_policy(field_writers))
+    })})
+}
+
+fn allocate_fresh_id<V>(objects: &HashMap<ObjectId, V>) -> ObjectId {
+    // TODO: Not exactly efficient
+    for i in 1..objects.len() {
+        if !objects.contains_key(&Nat::from(i)) {
+            return Nat::from(i);
+        }
+    }
+    Nat::from(objects.len() + 1)
+}
+
+fn check_value_matches_object_schema(value: &HashMap<FieldName, GenericValue>, schema: &ObjectSchema) -> Result<(), NFOError>{
+    if value.len() != schema.len() { return Err(SchemaMismatchError) };
+    for (name, value) in value.iter() {
+        let value_schema = schema.get(name).ok_or(SchemaMismatchError)?;
+        check_value_matches_value_schema(value, value_schema)?;
+    }
+    Ok(())
+}
+// #[ic_cdk_macros::update]
+pub fn mint(new_object_id: Option<ObjectId>, object_type: ObjectType, owner: Principal, value: HashMap<FieldName, GenericValue>) -> Result<ObjectId, NFOError> {
+    let caller = ic_cdk::caller();
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let mut ledger = l.borrow_mut();
+        let object_id = match new_object_id {
+            None => Ok(allocate_fresh_id(&ledger.objects)),
+            Some(id) if ledger.objects.contains_key(&id) => Err(DuplicateObjectIdError { object_id: id }),
+            Some(id) => Ok(id),
+        }?;
+        let o_borrow = o.borrow();
+        let oac = o_borrow.get(&object_type).unwrap();
+        let schema = &oac.object_schema;
+        let _ = if oac.can_mint.contains(&caller) { Ok(()) } else { Err(NotAuthorizedError) }?;
+        check_value_matches_object_schema(&value, &schema)?;
+        ledger.objects.insert(object_id.clone(), Object { owner: owner, object_type: object_type, fields: value });
+        Ok(object_id)
+    })})
 }
 
 // #[ic_cdk_macros::update]
-fn mint(new_object_id: Option<ObjectIdentifier>, value: HashMap<String, GenericValue>) -> Result<ObjectIdentifier, ErrorTodo> {
-    // TODO: check that the value of the field corresponds to the object schema
-    // TODO: check that the caller is allowed to mint
-    // TODO: check that the identifier is not already used (if provided)
-    // TODO: mint
-    todo!()
-}
-
-// #[ic_cdk_macros::update]
-fn burn(object_id: ObjectIdentifier) -> Result<(), ErrorTodo> {
+pub fn burn(object_id: ObjectId) -> Result<(), NFOError> {
     let caller = ic_cdk::caller();
-    // TODO: check that the object exists
-    // TODO: check that the caller is allowed to burn
-    // TODO: burn
-    todo!()
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let mut ledger = l.borrow_mut();
+        let obj = ledger.objects.get_mut(&object_id).ok_or(NoSuchObjectError { object_id: object_id.clone() })?;
+        let o_borrow = o.borrow();
+        let oac = o_borrow.get(&obj.object_type).unwrap();
+        let _ = check_caller_allowed(&caller, &obj.owner, &oac.can_burn)?;
+        ledger.objects.remove(&object_id);
+        Ok(())
+    })})
 }
