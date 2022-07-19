@@ -35,3 +35,75 @@ dfx deploy
 ```
 
 Once the job completes, your application will be available at `http://localhost:8000?canisterId={asset_canister_id}`.
+
+# Notes
+
+Use case:
+  1. Ognjen owns two sword NFOs
+  2. Satya owns 3 potion NFOs
+  3. Ognjen wants to trade the two swords for 3 potions
+  4. The trade should happen only if Satya agrees
+
+Level 1 policy:
+ Sword: can be transferred by owner
+ Potion: can be transferred by owner
+
+
+Level 2 policy: dynamic, can be added/changed by users
+
+
+Basic objects:
+  (object_id: #1, type: #sword, metadata: { owner: Ognjen }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #2, type: #sword, metadata: { owner: Ognjen }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #3, type: #potion, metadata: { owner: Satya }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #4, type: #potion, metadata: { owner: Satya }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #5, type: #potion, metadata: { owner: Satya }, #operations: {name: owner.write, authorizer: owner})
+
+Ognjen calls create_proposal on the ledger:
+   object(#1).owner.write(Satya); (needs to be approved by: Ognjen)
+   object(#2).owner.write(Satya); (needs to be approved by: Ognjen)
+   object(#3).owner.write(Ognjen); (needs to be approved by: Satya)
+   object(#4).owner.write(Ognjen); (needs to be approved by: Satya)
+   object(#5).owner.write(Ognjen); (needs to be approved by: Satya)
+
+Result: proposal #15
+
+Satya calls accept_proposal(#15)
+   - The ledger checks that all basic operations are approved by either creator or the acceptor of the proposal
+   - The ledger transfers the NFOs
+
+==============================
+
+Use case #2:
+1. NFT creator can mint new objects as they want
+2. Ognjen owns an egg
+
+Basic object:
+  (object_id: #1, type: egg, metadata: { owner: Ognjen }, operations: {name: burn, authorizer: owner } )
+
+NFT creator calls create_proposal on the ledger:
+   object(#1).burn(); (needs to be approved by Ognjen)
+   mint({ type: baby_dino, metadata: { owner: Ognjen }, operations: {name: burn, authorizer: owner } } );
+                (needs to be approved by NFT creator)
+
+Result: proposal #42
+
+Ognjen calls accept_proposal(#42)
+   - The ledger checks that all basic operations are approved by either the creator or the acceptor of the proposal
+   - The ledger executes the rule; as a result, egg is burnt, baby dino is minted
+   - The proposal #42 is deleted
+
+
+==============================
+
+Use case #3: like #2, but we want a permanent proposal by the NFT creator that is applicable to all eggs
+
+Level 2.5 policy (with parameters, assertions and so on)
+
+NFT creator create_proposal on the ledger:
+  - the proposal takes a parameter, object_id
+
+    require(object(object_id).type = "egg");
+    object(object_id).burn();
+    mint({ type: baby_dino, metadata: { owner: object(object_id).owner }, operations: {name: burn, authorizer: owner } } 
+
