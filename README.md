@@ -49,7 +49,9 @@ Level 1 policy:
  Potion: can be transferred by owner
 
 
+======================================================
 Level 2 policy: dynamic, can be added/changed by users
+======================================================
 
 
 Basic objects:
@@ -72,7 +74,7 @@ Satya calls accept_proposal(#15)
    - The ledger checks that all basic operations are approved by either creator or the acceptor of the proposal
    - The ledger transfers the NFOs
 
-==============================
+------------------------------
 
 Use case #2:
 1. NFT creator can mint new objects as they want
@@ -93,12 +95,48 @@ Ognjen calls accept_proposal(#42)
    - The ledger executes the rule; as a result, egg is burnt, baby dino is minted
    - The proposal #42 is deleted
 
+------------------------------
+
+=======================================
+Level 2.5 policy: transitive delegation
+=======================================
+
+
+Use case #3:
+  Ognjen wants to sell all 3 of his swords, but only if he can get both 2 bottles of potion from Satya and 1 magic hat from Jan
+
+  (object_id: #1, type: #sword, metadata: { owner: Ognjen }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #2, type: #sword, metadata: { owner: Ognjen }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #3, type: #sword, metadata: { owner: Ognjen }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #4, type: #potion, metadata: { owner: Satya }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #5, type: #potion, metadata: { owner: Satya }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #6, type: #magic_hat, metadata: { owner: Jan }, #operations: {name: owner.write, authorizer: owner})
+
+Satya calls create_proposal for Ognjen with
+   object(#1).owner.write(Satya); (needs to be approved by: Ognjen)
+   object(#2).owner.write(Satya); (needs to be approved by: Ognjen)
+   object(#4).owner.write(Ognjen); (needs to be approved by: Satya)
+   object(#5).owner.write(Ognjen); (needs to be approved by: Satya)
+
+Result: proposal #1
+
+Ognjen calls create_proposal for Jan with:
+   object(#3).owner.write(Jan); (needs to be approved by: Ognjen)
+   object(#6).owner.write(Ognjen); (needs to be approved by: Jan)
+   accept_proposal(#1)
+
+Result: proposal #2
+   
+Jan calls accept_proposal(#2); this results in the full trade.
+With proposal #2, Ognjen (conditionally) delegated his right to accept proposal #1 to Jan.
 
 ==============================
+Level 3: programmatic policies
+==============================
 
-Use case #3: like #2, but we want a permanent proposal by the NFT creator that is applicable to all eggs
+Use case #4: like #2, but we want a "standing order" by the NFT creator that is applicable to all eggs
 
-Level 2.5 policy (with parameters, assertions and so on)
+Level 3 policy (with parameters, assertions and so on)
 
 NFT creator create_proposal on the ledger:
   - the proposal takes a parameter, object_id
@@ -106,4 +144,7 @@ NFT creator create_proposal on the ledger:
     require(object(object_id).type = "egg");
     object(object_id).burn();
     mint({ type: baby_dino, metadata: { owner: object(object_id).owner }, operations: {name: burn, authorizer: owner } } 
+
+
+------------------------------
 

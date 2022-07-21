@@ -82,7 +82,7 @@ pub struct Ledger {
 }
 
 #[derive(Default)]
-struct CanisterAccessControlPolicy {
+pub struct CanisterAccessControlPolicy {
     can_create_new_types: HashSet<Principal>,
     // TODO: add whatever canister-level actions we need
 }
@@ -103,16 +103,6 @@ pub struct ObjectAccessControlPolicy {
 } 
 
 type ObjectAccessControlPolicyByType = HashMap<ObjectType, ObjectAccessControlPolicy>;
-
-// TODO: add default implementations of the data structures
-thread_local!(
-    static LEDGER: RefCell<Ledger> = RefCell::new(Ledger::default());
-    static CANISTER_ACCESS_CONTROL: RefCell<CanisterAccessControlPolicy> = RefCell::new(CanisterAccessControlPolicy::default());
-    static OBJECT_ACCESS_CONTROL: RefCell<ObjectAccessControlPolicyByType>  = RefCell::new(ObjectAccessControlPolicyByType::default());
-);
-
-
-
 
 fn check_value_matches_value_schema(value: &GenericValue, schema: &GenericValueSchema) -> Result<(), NFOError> {
     match (value, schema) {
@@ -154,7 +144,7 @@ fn check_caller_allowed(caller: &Principal, owner: &Principal, actors: &HashSet<
     }
 }
 
-fn set_value_internal(
+pub fn set_value_impl(
     caller: &Principal, 
     ledger: &mut Ledger, 
     oac_by_type: &ObjectAccessControlPolicyByType, 
@@ -171,23 +161,13 @@ fn set_value_internal(
         Ok(())
 
 }
-// #[ic_cdk_macros::update]
-pub fn set_value(object_id: ObjectId, field_name: FieldName, value: GenericValue) -> Result<(), NFOError> {
-    let caller = ic_cdk::caller();
-
-    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
-        let mut ledger = l.borrow_mut();
-        let o_borrow = o.borrow();
-        set_value_internal(&caller, &mut ledger, &o_borrow, object_id, field_name, value)
-    })})
-}
 
 fn format_policy(field_writers: &HashMap<FieldName, HashSet<Actor>>) -> String {
     field_writers.iter().map(|(k, v)| 
         format!("{}: {:#?}\n", k, v)).collect()
 }
 
-pub fn display_policy_internal(ledger: &Ledger, oac_by_type: &ObjectAccessControlPolicyByType, object_id: ObjectId) -> Result<String, NFOError> {
+pub fn display_policy_impl(ledger: &Ledger, oac_by_type: &ObjectAccessControlPolicyByType, object_id: ObjectId) -> Result<String, NFOError> {
     let obj = ledger.objects.get(&object_id).ok_or(NoSuchObjectError { object_id: object_id })?;
     let oac = oac_by_type.get(&obj.object_type).unwrap();
     let field_writers = &oac.field_writers;
@@ -195,13 +175,6 @@ pub fn display_policy_internal(ledger: &Ledger, oac_by_type: &ObjectAccessContro
 }
 
 
-pub fn display_policy(object_id: ObjectId) -> Result<String, NFOError> {
-    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
-        let ledger = l.borrow();
-        let o_borrow = o.borrow();
-        display_policy_internal(&ledger, &o_borrow, object_id)
-    })})
-}
 
 fn allocate_fresh_id<V>(objects: &HashMap<ObjectId, V>) -> ObjectId {
     // TODO: Not exactly efficient
@@ -222,7 +195,7 @@ fn check_value_matches_object_schema(value: &HashMap<FieldName, GenericValue>, s
     Ok(())
 }
 
-fn mint_internal(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAccessControlPolicyByType, new_object_id: Option<ObjectId>, object_type: ObjectType, owner: Principal, value: HashMap<FieldName, GenericValue>) -> Result<ObjectId, NFOError> {
+pub fn mint_impl(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAccessControlPolicyByType, new_object_id: Option<ObjectId>, object_type: ObjectType, owner: Principal, value: HashMap<FieldName, GenericValue>) -> Result<ObjectId, NFOError> {
     let object_id = match new_object_id {
         None => Ok(allocate_fresh_id(&ledger.objects)),
         Some(id) if ledger.objects.contains_key(&id) => Err(DuplicateObjectIdError { object_id: id }),
@@ -236,17 +209,8 @@ fn mint_internal(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAc
     Ok(object_id)
 }
 
-// #[ic_cdk_macros::update]
-pub fn mint(new_object_id: Option<ObjectId>, object_type: ObjectType, owner: Principal, value: HashMap<FieldName, GenericValue>) -> Result<ObjectId, NFOError> {
-    let caller = ic_cdk::caller();
-    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
-        let mut ledger = l.borrow_mut();
-        let o_borrow = o.borrow();
-        mint_internal(&caller, &mut ledger, &o_borrow, new_object_id, object_type, owner, value)
-    })})
-}
 
-fn burn_internal(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAccessControlPolicyByType, object_id: ObjectId) -> Result<(), NFOError> {
+pub fn burn_impl(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAccessControlPolicyByType, object_id: ObjectId) -> Result<(), NFOError> {
     let obj = ledger.objects.get_mut(&object_id).ok_or(NoSuchObjectError { object_id: object_id.clone() })?;
     let oac = oac_by_type.get(&obj.object_type).unwrap();
     let _ = check_caller_allowed(&caller, &obj.owner, &oac.can_burn)?;
@@ -255,17 +219,8 @@ fn burn_internal(caller: &Principal, ledger: &mut Ledger, oac_by_type: &ObjectAc
 
 }
 
-// #[ic_cdk_macros::update]
-pub fn burn(object_id: ObjectId) -> Result<(), NFOError> {
-    let caller = ic_cdk::caller();
-    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
-        let mut ledger = l.borrow_mut();
-        let o_borrow = o.borrow();
-        burn_internal(&caller, &mut ledger, &o_borrow, object_id)
-    })})
-}
 
-fn add_object_type_internal(
+pub fn add_object_type_impl(
     caller: &Principal, 
     cac: &CanisterAccessControlPolicy, 
     oac_by_type: &mut ObjectAccessControlPolicyByType, 
@@ -279,11 +234,70 @@ fn add_object_type_internal(
 
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn basic_workflow() {
+        let _ledger = Ledger::default();
+        // let admin = Principal::from("p1");
+        let _cac = CanisterAccessControlPolicy::default();
+        let _oac_by_type = ObjectAccessControlPolicyByType::default();
+    }
+}
+
+thread_local!(
+    static LEDGER: RefCell<Ledger> = RefCell::new(Ledger::default());
+    static CANISTER_ACCESS_CONTROL: RefCell<CanisterAccessControlPolicy> = RefCell::new(CanisterAccessControlPolicy::default());
+    static OBJECT_ACCESS_CONTROL: RefCell<ObjectAccessControlPolicyByType>  = RefCell::new(ObjectAccessControlPolicyByType::default());
+);
+
 pub fn add_object_type(object_type: ObjectType, policy: ObjectAccessControlPolicy) -> Result<(), NFOError> {
     let caller = ic_cdk::caller();
     CANISTER_ACCESS_CONTROL.with(|c| { OBJECT_ACCESS_CONTROL.with(|o| {
         let cac = c.borrow_mut();
         let mut oac_by_type = o.borrow_mut();
-        add_object_type_internal(&caller, &cac, &mut oac_by_type, object_type, policy)
+        add_object_type_impl(&caller, &cac, &mut oac_by_type, object_type, policy)
     })})
 }
+
+// #[ic_cdk_macros::update]
+pub fn burn(object_id: ObjectId) -> Result<(), NFOError> {
+    let caller = ic_cdk::caller();
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let mut ledger = l.borrow_mut();
+        let o_borrow = o.borrow();
+        burn_impl(&caller, &mut ledger, &o_borrow, object_id)
+    })})
+}
+
+// #[ic_cdk_macros::update]
+pub fn set_value(object_id: ObjectId, field_name: FieldName, value: GenericValue) -> Result<(), NFOError> {
+    let caller = ic_cdk::caller();
+
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let mut ledger = l.borrow_mut();
+        let o_borrow = o.borrow();
+        set_value_impl(&caller, &mut ledger, &o_borrow, object_id, field_name, value)
+    })})
+}
+
+pub fn display_policy(object_id: ObjectId) -> Result<String, NFOError> {
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let ledger = l.borrow();
+        let o_borrow = o.borrow();
+        display_policy_impl(&ledger, &o_borrow, object_id)
+    })})
+}
+
+// #[ic_cdk_macros::update]
+pub fn mint(new_object_id: Option<ObjectId>, object_type: ObjectType, owner: Principal, value: HashMap<FieldName, GenericValue>) -> Result<ObjectId, NFOError> {
+    let caller = ic_cdk::caller();
+    LEDGER.with(|l| { OBJECT_ACCESS_CONTROL.with(|o| {
+        let mut ledger = l.borrow_mut();
+        let o_borrow = o.borrow();
+        mint_impl(&caller, &mut ledger, &o_borrow, new_object_id, object_type, owner, value)
+    })})
+}
+
