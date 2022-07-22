@@ -145,6 +145,35 @@ NFT creator create_proposal on the ledger:
     object(object_id).burn();
     mint({ type: baby_dino, metadata: { owner: object(object_id).owner }, operations: {name: burn, authorizer: owner } } 
 
-
 ------------------------------
 
+=========================================================
+Level 3.5: programmatic policies with joint authorization
+=========================================================
+
+Use case #5: limiting transfer of swords to users with level > 50
+
+Idea:
+ - Instead of a single owner of an NFO, or a single authorizer of changing a field, we add joint owners/authorizers
+ - We use "self", the Principal of the NFO Canister as the co-owner of NFOs
+ - When creating the object type, the NFO canister author can add "persistent proposals" that are authorized by "self"
+
+Objects:
+  (object_id: #1, type: #sword, metadata: { owner: {self, Ognjen}, user: Ognjen }, #operations: {name: owner.write, authorizer: owner})
+  (object_id: #2, type: #level, metadata: { owner: self, user: Ognjen, value: 100 }, #operations: {name: value.write, authorizer: {self, game_canister})
+  (object_id: #2, type: #level, metadata: { owner: self, user: Satya, value: 500 }, #operations: {name: value.write, authorizer: {self, game_canister})
+
+Permanent proposals, authorized by "self":
+
+transfer_sword(object_id, to_level_id):
+  require(object(object_id).type = "sword")
+  require(object(to_level_id).type = "level")
+  require(object(to_level_id).value > 50)
+  object(object_id).owner = {self, object(to_level_id).user }
+
+Bonus example: force that the user level can only increase
+
+increase_level(object_id, amount):
+  require(object(object_id).type = "level")
+  object(object_id).level += amount (needs to be approved by: self, game_canister)
+   
