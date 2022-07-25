@@ -38,12 +38,6 @@ Once the job completes, your application will be available at `http://localhost:
 
 # Notes
 
-Use case:
-  1. Ognjen owns two sword NFOs
-  2. Satya owns 3 potion NFOs
-  3. Ognjen wants to trade the two swords for 3 potions
-  4. The trade should happen only if Satya agrees
-
 Level 1 policy:
  Sword: can be transferred by owner
  Potion: can be transferred by owner
@@ -53,6 +47,11 @@ Level 1 policy:
 Level 2 policy: dynamic, can be added/changed by users
 ======================================================
 
+Use case:
+  1. Ognjen owns two sword NFOs
+  2. Satya owns 3 potion NFOs
+  3. Ognjen wants to trade the two swords for 3 potions
+  4. The trade should happen only if Satya agrees
 
 Basic objects:
   (object_id: #1, type: #sword, metadata: { owner: Ognjen }, #operations: {name: owner.write, authorizer: owner})
@@ -68,7 +67,7 @@ Ognjen calls create_proposal on the ledger:
    object(#4).owner.write(Ognjen); (needs to be approved by: Satya)
    object(#5).owner.write(Ognjen); (needs to be approved by: Satya)
 
-Result: proposal #15
+Result: proposal #15 (authorized by Ognjen)
 
 Satya calls accept_proposal(#15)
    - The ledger checks that all basic operations are approved by either creator or the acceptor of the proposal
@@ -88,7 +87,7 @@ NFT creator calls create_proposal on the ledger:
    mint({ type: baby_dino, metadata: { owner: Ognjen }, operations: {name: burn, authorizer: owner } } );
                 (needs to be approved by NFT creator)
 
-Result: proposal #42
+Result: proposal #42 (authorized by NFT creator)
 
 Ognjen calls accept_proposal(#42)
    - The ledger checks that all basic operations are approved by either the creator or the acceptor of the proposal
